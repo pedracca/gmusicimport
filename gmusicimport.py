@@ -18,7 +18,54 @@
 import getpass
 import argparse
 import json
+import time
+import unicodedata
 from gmusicapi import Mobileclient
+
+def normalize_string(str):
+    return str.strip().lower()
+
+
+PERFECT_MATCH = 4
+BAD_MATCH = 2
+MAX_SECONDS_LENGTH_DIFF = 7
+
+
+def find_best_match(track, results):
+    best = None
+    hit_index = 0
+    max_score = 0
+    for hit_i, hit in enumerate(results):
+        potential = hit["track"]
+        score = 0
+        if normalize_string(track["title"]) == normalize_string(potential["title"]):
+            score += 1
+        if normalize_string(track["artist"]) == normalize_string(potential["artist"]):
+            score += 1
+        if normalize_string(track["album"]) == normalize_string(potential["album"]):
+            score += 1
+        if abs(int(track["length"]) - (int(potential["durationMillis"]) / 1000)) <= MAX_SECONDS_LENGTH_DIFF:
+            score += 1
+        if score == PERFECT_MATCH or (score > BAD_MATCH and score > max_score):
+            best = potential
+            hit_index = hit_i
+            max_score = score
+            if score == PERFECT_MATCH:
+                break
+    if not best and results:
+        best = results[0]["track"]
+    if args.verbose and best:
+        quality = "* perfect *"
+        if max_score < PERFECT_MATCH and max_score > BAD_MATCH:
+            quality = "     - OK -"
+        elif max_score <= BAD_MATCH and best:
+            quality = "        Bad"
+        print("  %s match for [%s by %s in %s] at hit num. %d/%d: [%s by %s in %s]" %
+              (quality, track["title"], track["artist"], track["album"],
+               hit_index + 1, len(results), best["title"], best["artist"], best["album"]))
+
+    return best
+
 
 if __name__ == "__main__":
     client = Mobileclient()
@@ -35,7 +82,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print("Logging in as \"%s\" to Google Play Music" % args.username)
     pw = getpass.getpass()
-    if not client.login(args.username, pw, Mobileclient.FROM_MAC_ADDRESS)):
+    if not client.login(args.username, pw, Mobileclient.FROM_MAC_ADDRESS):
         print("Authentication failed. Please check the provided credentials.")
     with open(args.source) as f:
         data = json.load(f)
@@ -49,25 +96,15 @@ if __name__ == "__main__":
         toimport = []
         for track in playlist["tracks"]:
             query = "%s %s" % (track["title"], track["artist"])
-            results = client.search_all_access(query)
+            results = client.search(query)
             match = None
-            if args.verbose:
-                print("Fetching matches for %s" % query)
-            for hit_i, hit in enumerate(results["song_hits"]):
-                if hit_i >= 10:
-                    break
-                if args.verbose and hit_i < 10:
-                    print("Hit %d, scoring %.02f: %s by %s in %s" %
-                            (hit_i + 1,
-                             hit["score"], hit["track"]["title"],
-                             hit["track"]["artist"], hit["track"]["album"]))
-                if hit["score"] > 50:
-                    match = hit["track"]["storeId"]
-                    break
+            if results["song_hits"]:
+                match = find_best_match(track, results["song_hits"])
             if match is not None:
-                toimport.append(match)
+                toimport.append(match["storeId"])
             else:
-                print("[!!!] No good match for %s" % query)
+                print("[!!!] No good match for %s in playlist %s" % (query, playlist["title"]))
+            time.sleep(.1)
         if not args.dryrun and toimport:
-            playlist_id = client.create_playlist(playlist["title"])
-            client.add_songs_to_playlist(playlist_id, toimport)
+                playlist_id = client.create_playlist(playlist["title"])
+                client.add_songs_to_playlist(playlist_id, toimport)
