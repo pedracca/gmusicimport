@@ -20,10 +20,19 @@ import argparse
 import json
 import time
 import unicodedata
+import re
 from gmusicapi import Mobileclient
 
+
+stripWords = ['a', 'the', 'in', 'of', 'to', 'at', 'from']
+normalize_pattern = re.compile(r'\s|\W|\b(' + r'|'.join(stripWords) + r')\b\s*')
+parenthesis_pattern = re.compile(r'\(.+?\)')
+
+
 def normalize_string(str):
-    return str.strip().lower()
+    normalized = normalize_pattern.sub('', str.lower())
+    normalized = ''.join(c for c in unicodedata.normalize('NFD', normalized) if unicodedata.category(c) != 'Mn')
+    return normalized
 
 
 PERFECT_MATCH = 4
@@ -38,6 +47,7 @@ def find_best_match(track, results):
     for hit_i, hit in enumerate(results):
         potential = hit["track"]
         score = 0
+        #print("-> evaluating %d: [%s by %s in %s]" % (hit_i, potential["title"], potential["artist"], potential["album"]))
         if normalize_string(track["title"]) == normalize_string(potential["title"]):
             score += 1
         if normalize_string(track["artist"]) == normalize_string(potential["artist"]):
@@ -63,8 +73,15 @@ def find_best_match(track, results):
         print("  %s match for [%s by %s in %s] at hit num. %d/%d: [%s by %s in %s]" %
               (quality, track["title"], track["artist"], track["album"],
                hit_index + 1, len(results), best["title"], best["artist"], best["album"]))
-
     return best
+
+
+def search_tracks(query):
+    results = client.search(query)
+    if not results["song_hits"] and parenthesis_pattern.search(query):
+        time.sleep(.1)
+        results = client.search(parenthesis_pattern.sub('', query))
+    return results
 
 
 if __name__ == "__main__":
@@ -88,15 +105,17 @@ if __name__ == "__main__":
         data = json.load(f)
     if args.dryrun:
         print("[/!\] We're currently running in dry-run mode")
+    unmatched = {"playlists": []}
     for playlist in data["playlists"]:
         if args.dryrun:
             print("Checking importability of %s" % playlist["title"])
         else:
             print("Importing %s" % playlist["title"])
+        unmatched_songs = []
         toimport = []
         for track in playlist["tracks"]:
             query = "%s %s" % (track["title"], track["artist"])
-            results = client.search(query)
+            results = search_tracks(query)
             match = None
             if results["song_hits"]:
                 match = find_best_match(track, results["song_hits"])
@@ -104,7 +123,13 @@ if __name__ == "__main__":
                 toimport.append(match["storeId"])
             else:
                 print("[!!!] No good match for %s in playlist %s" % (query, playlist["title"]))
+                unmatched_songs.append(track)
             time.sleep(.1)
+        if unmatched_songs:
+            unmatched["playlists"].append({"title": playlist["title"], "tracks": unmatched_songs})
         if not args.dryrun and toimport:
                 playlist_id = client.create_playlist(playlist["title"])
                 client.add_songs_to_playlist(playlist_id, toimport)
+        if not args.dryrun and unmatched["playlists"]:
+            with open("unmatched.json", "w") as f:
+                json.dump(unmatched, f, indent=2)
